@@ -1,0 +1,717 @@
+---
+title: "YouTube Trending Video Dataset — Аналитички извештај"
+author: "Давор Хома"
+date: "2026-05-24"
+output:
+  pdf_document:
+    latex_engine: xelatex
+    keep_tex: false
+  html_document: default
+header-includes:
+  - \usepackage{fontspec}
+  - \usepackage{polyglossia}
+  - \usepackage{placeins}
+  - \setmainlanguage{serbian}
+  - \setotherlanguage{english}
+  - \setmainfont{DejaVu Serif}
+  - \setmonofont{DejaVu Sans Mono}
+  - \setsansfont{DejaVu Sans}
+---
+
+# 1. Избор скупа података
+
+За потребе пројекта одабран је скуп података „All Regions Youtube Trending Video Dataset", доступан на [Kaggle платформи](https://www.kaggle.com/datasets/davorhoma/all-regions-youtube-trending-video-dataset).
+Оригинални извор података је скуп [YouTube Trending Video Dataset](https://www.kaggle.com/datasets/rsrishav/youtube-trending-video-dataset) аутора Ришав Шарма, док је коришћена верзија додатно унапређена кроз проширење атрибута коришћењем YouTube API-ја и обједињавање више региона у јединствен скуп података.
+
+Скуп података има укупну величину од приближно 4,55 GB, што га сврстава у категорију великих скупова података погодних за анализу великих количина података.
+
+Сваки запис у скупу података представља један YouTube видео запис који се у одређеном тренутку (`trending_date`) налазио на листи трендова. Скуп података не садржи све YouTube видео записе, већ искључиво оне који су достигли статус трендинг видео записа у оквиру посматраног временског периода.
+
+Важно је напоменути да скуп података поседује природну денормализацију: исти видео запис може се појавити више пута уколико је био трендинг у различитим временским периодима. Овај аспект је адресиран у фази припреме података кроз одговарајуће агрегације.
+
+## 1.1 Атрибути скупа података
+
+Скуп података садржи следећа обележја:
+
+Обележје           Опис
+-----------------  -----------------------------------------------------------------
+video_id           Јединствени идентификатор видео записа
+title              Назив видео записа
+publishedAt        Датум и време објављивања видео записа
+channelId          Идентификатор YouTube канала
+channelTitle       Назив YouTube канала
+categoryId         Категорија видео записа
+trending_date      Датум када је видео био у трендинг секцији
+tags               Ознаке повезане са видео записом
+view_count         Број прегледа
+likes              Број позитивних реакција
+dislikes           Број негативних реакција
+comment_count      Број коментара
+thumbnail_link     Линк ка thumbnail слици
+comments_disabled  Информација да ли су коментари онемогућени
+ratings_disabled   Информација да ли су реакције онемогућене
+description        Опис видео записа
+duration_seconds   Трајање у секундама (изведено из ISO 8601 формата)
+
+Table: Атрибути скупа података
+
+Разноврсност атрибута омогућава смислено спровођење прелиминарне анализе података, класификације, кластеризације, као и визуелизације различитих образаца понашања трендинг видео садржаја на платформи YouTube.
+
+Посебна предност овог скупа је велика количина података, као и присуство података из различитих региона и категорија садржаја, што омогућава детаљнију анализу карактеристика видео записа који остварују високу популарност на платформи.
+
+# 2. Припрема података
+
+## 2.1 Учитавање података
+
+Подаци су учитани у R окружење коришћењем пакета `sparklyr` и функције `spark_read_csv`. Циљ је било омогућити ефикасно учитавање великог скупа података без непотребног оптерећења меморије.
+
+```{r ucitavanje, echo=TRUE, eval=FALSE}
+sc <- spark_connect(master = "local[*]")
+
+dataset <- spark_read_csv(
+  sc,
+  name = "youtube",
+  path = "data/all_regions_youtube_trending_data_with_duration.csv",
+  header = TRUE,
+  infer_schema = TRUE
+)
+
+dataset <- dataset %>%
+  clean_names() %>%
+  mutate(
+    view_count    = as.numeric(view_count),
+    likes         = as.numeric(likes),
+    dislikes      = as.numeric(dislikes),
+    comment_count = as.numeric(comment_count),
+    published_at  = to_date(published_at),
+    trending_date = to_date(trending_date),
+    category_id   = as.numeric(category_id),
+    duration      = as.character(duration)
+  )
+```
+
+## 2.2 Чишћење података
+
+Уклоњени су дупликати по пару (`video_id`, `trending_date`) коришћењем функције `distinct()`, чиме је обезбеђено да сваки трендинг догађај буде заступљен тачно једном пре агрегације.
+
+```{r ciscenje, echo=TRUE, eval=FALSE}
+youtube_clean <- dataset %>%
+  distinct(video_id, trending_date, .keep_all = TRUE)
+```
+
+## 2.3 Обрада недостајућих вредности
+
+Анализирано је присуство недостајућих вредности у свим колонама скупа података. Примењене су следеће стратегије:
+
+- уклањање редова са недостајућим вредностима обавезних поља (`video_id`, `trending_date`, `view_count`)
+```{r uklanjanje, echo=TRUE, eval=FALSE}
+youtube_clean <- youtube_clean %>%
+    filter(
+      !is.na(video_id),
+      !is.na(trending_date),
+      !is.na(view_count) | view_count == 0
+    )
+```
+- импутација медијаном за нумеричке атрибуте `view_count`, `likes` и `comment_count`
+
+```{r nedostajuce, echo=TRUE, eval=FALSE}
+# Izracunavanje medijana na Spark skupu
+medians <- youtube_clean %>%
+  summarise(
+    view_med     = percentile_approx(view_count, 0.5),
+    likes_med    = percentile_approx(likes, 0.5),
+    comments_med = percentile_approx(comment_count, 0.5)
+  ) %>%
+  collect()
+
+# Imputacija medijanom
+youtube_clean <- youtube_clean %>%
+  mutate(
+    view_count    = ifelse(is.na(view_count) | view_count == 0,
+                           medians$view_med, view_count),
+    likes         = ifelse(is.na(likes), medians$likes_med, likes),
+    comment_count = ifelse(is.na(comment_count),
+                           medians$comments_med, comment_count)
+  )
+```
+
+**Напомена о атрибуту `dislikes`:** од 2021. године, YouTube је уклонио јавни приказ броја негативних реакција, што је резултовало тиме да у овом скупу података 68% вредности овог атрибута недостаје. Због тога `dislikes` није коришћен као предикторско обележје у анализи.
+
+## 2.4 Текстуална поља {#text-fields-sub}
+
+Атрибути `title`, `tags` и `description` нису укључени у класификацију и кластеризацију. Разлог за ово искључење је обим пројекта. NLP обрада текста представља посебну целину која би повећала сложеност анализе.
+
+## 2.5 Трансформација атрибута
+
+Атрибут `duration_seconds` изведен је из ISO 8601 формата (`PT1H23M45S`) применом регуларних израза.
+
+```{r transformacija, echo=TRUE, eval=FALSE}
+# Izvođenje duration_seconds iz ISO 8601 formata
+youtube_clean <- youtube_clean %>%
+  mutate(
+    duration = coalesce(duration, "PT0S"),
+    h = as.integer(regexp_extract(duration, "([0-9]+)H", 1)),
+    m = as.integer(regexp_extract(duration, "([0-9]+)M", 1)),
+    s = as.integer(regexp_extract(duration, "([0-9]+)S", 1)),
+    duration_seconds = as.integer(
+      coalesce(h, 0L) * 3600L +
+      coalesce(m, 0L) * 60L +
+      coalesce(s, 0L)
+    )
+  )
+```
+
+Атрибут `category_id` је пресликан на одговарајући текстуални назив категорије (`category_name`) путем унапред дефинисане мапе. У скупу се налазе **15 различитих вредности циљног обележја** иако YouTube дефинише више од 15 категорија.
+
+```{r mapiranje-category-id, echo=TRUE, eval=FALSE}
+# Mapiranje category_id na naziv kategorije
+  category_map <- data.frame(
+    category_id = c(
+      1, 2, 10, 15, 17,
+      18, 19, 20, 21, 22,
+      23, 24, 25, 26, 27,
+      28, 29, 30, 31, 32,
+      33, 34, 35, 36, 37,
+      38, 39, 40, 41, 42,
+      43, 44, -1
+    ),
+    category_name = c(
+      "Film & Animation",
+      "Autos & Vehicles",
+      ...
+    )
+  )
+  category_map$category_id <- as.integer(category_map$category_id)
+  category_map_spark <- copy_to(sc, category_map, overwrite = TRUE)
+
+  youtube_clean <- youtube_clean %>%
+    left_join(category_map_spark, by = "category_id")
+```
+
+## 2.6 Адресирање денормализације {#denormalization-sub}
+
+Будући да се исти видео запис може појавити више пута у скупу података, извршена је агрегација по `video_id`. За потребе класификације и кластеризације креиран је агрегирани скуп са једним записом по видеу, коришћењем максималних вредности нумеричких атрибута (врхунац популарности). Поред тога, током агрегације је израчунат атрибут `trending_count` који означава број пута колико је одређени видео запис био у трендовима и биће употребљен за кластеризацију.
+
+```{r agregacija, echo=TRUE, eval=FALSE}
+youtube_aggregated <- youtube_clean %>%
+  group_by(video_id, category_id, category_name) %>%
+  summarise(
+    view_count       = max(view_count, na.rm = TRUE),
+    likes            = max(likes, na.rm = TRUE),
+    comment_count    = max(comment_count, na.rm = TRUE),
+    duration_seconds = max(duration_seconds, na.rm = TRUE),
+    trending_count   = n(),
+    .groups = "drop"
+  )
+```
+
+## 2.7 Извођење нових атрибута
+
+На основу постојећих нумеричких атрибута изведена су два нова обележја која боље описују ангажованост гледалаца:
+
+- `like_rate` = `likes` / `view_count` -- стопа позитивних реакција
+- `comment_rate` = `comment_count` / `view_count` -- стопа коментара
+
+Атрибут `engagement_rate` = (`likes` + `comment_count`) / `view_count` је разматран као кандидат, али је искључен због готово савршене корелације са `like_rate` (r = 0,992), што би унело редундантност у предикторски скуп.
+
+```{r izvedeni_atributi, echo=TRUE, eval=FALSE}
+youtube_aggregated <- youtube_aggregated %>%
+  mutate(
+    like_rate    = likes / view_count,
+    comment_rate = comment_count / view_count
+  ) %>%
+  filter(
+    view_count > 0,
+    !is.na(like_rate),
+    !is.na(comment_rate)
+  )
+```
+
+# 3. Прелиминарна анализа података
+
+## 3.1 Дескриптивна статистика
+
+За свих шест нумеричких обележја израчунате су основне дескриптивне статистике: средња вредност, медијана, стандардна девијација, минимум, максимум и квартили.
+
+```{r deskriptivna, echo=TRUE, eval=FALSE}
+num_stats <- youtube_data %>%
+  summarise(
+    view_mean   = mean(view_count, na.rm = TRUE),
+    view_median = percentile_approx(view_count, 0.5),
+    view_sd     = sd(view_count, na.rm = TRUE),
+    view_min    = min(view_count, na.rm = TRUE),
+    view_max    = max(view_count, na.rm = TRUE),
+    view_q1     = percentile_approx(view_count, 0.25),
+    view_q3     = percentile_approx(view_count, 0.75),
+    # ... (analogno za likes, comment_count, duration_seconds, like_rate, comment_rate)
+  ) %>%
+  collect()
+```
+
+Анализа дескриптивних статистика открива изражену десну асиметрију код свих обележја повезаних са популарношћу (`view_count`, `likes`, `comment_count`). Медијана је знатно нижа од средње вредности, што указује на присуство малог броја видео записа са изузетно великим вредностима.
+
+## 3.2 Визуализација расподела
+
+### Хистограми
+
+Расподеле нумеричких обележја приказане су на логаритамској скали X осе, јер сирове вредности показују јаку десну асиметрију.
+
+![Расподела броја прегледа](graphics/hist_1.png){width=80%}
+
+![Расподела броја лајкова](graphics/hist_2.png){width=80%}
+
+![Расподела броја коментара](graphics/hist_3.png){width=80%}
+
+![Расподела трајања видео записа](graphics/hist_4.png){width=80%}
+
+![Расподела стопе лајкова](graphics/hist_5.png){width=80%}
+
+![Расподела стопе коментара](graphics/hist_6.png){width=80%}
+
+\FloatBarrier
+
+Код свих шест обележја хистограми на log скали показују приближно симетричну расподелу, и може се закључити да подаци имају log-нормалну природу. Изведени атрибути `like_rate` и `comment_rate` такође показују сличан образац.
+
+### Boxplot графикони
+
+Boxplot графикони омогућавају визуелну детекцију аутлајера. Приказани су такође на логаритамској скали.
+
+![Boxplot броја прегледа](graphics/boxplot_1.png){width=80%}
+
+![Boxplot броја лајкова](graphics/boxplot_2.png){width=80%}
+
+![Boxplot броја коментара](graphics/boxplot_3.png){width=80%}
+
+![Boxplot трајања видео записа](graphics/boxplot_4.png){width=80%}
+
+![Boxplot стопе лајкова](graphics/boxplot_5.png){width=80%}
+
+![Boxplot стопе коментара](graphics/boxplot_6.png){width=80%}
+
+\FloatBarrier
+
+Код свих обележја уочава се значајан број аутлајера изнад горњег квартила, нарочито код `view_count` и `likes`, где поједини видео записи остварују вредности неколико редова величине изнад медијане.
+
+### Расподела по категоријама
+
+Bar plot приказује број видео записа по свакој од 15 категорија циљног обележја `category_name`. Овај приказ је посебно важан јер омогућава увид у потенцијалну неуравнотеженост класа.
+
+![Број видео записа по категорији](graphics/barplot_1.png){width=90%}
+
+\FloatBarrier
+
+Из графика је јасно видљива изражена неуравнотеженост класа. Kатегорије попут „Entertainment", „People & Blogs" и „Gaming" значајно доминирају над категоријама попут „Nonprofits & Activism" или „Pets & Animals". 
+<!-- Ова неуравнотеженост узета је у обзир приликом одабира метрика и стратегије валидације у фази класификације. -->
+
+## 3.3 Анализа односа између обележја
+
+### Корелациона анализа
+
+```{r korelacija, echo=TRUE, eval=FALSE}
+numeric_data <- youtube_sample %>%
+  select(view_count, likes, comment_count,
+         duration_seconds, like_rate, comment_rate)
+
+cor_matrix <- cor(numeric_data, use = "complete.obs")
+```
+
+![Корелациона матрица нумеричких варијабли](graphics/cor_matrix_plot_1.png){width=80%}
+
+\FloatBarrier
+
+Корелациона матрица потврђује очекивано јаку позитивну корелацију између `view_count`, `likes` и `comment_count`. Атрибут `duration_seconds` показује слабу корелацију са осталим обележјима, чиме потврђује своју информативну вредност као независан предиктор. Изведени атрибути `like_rate` и `comment_rate` показују слабу корелацију са апсолутним бројевима, чиме се потврђује да носе различиту информацију. Такође, корелација између `like_rate` и `comment_rate` је умерена (r ≈ 0,37), а не блиска 1, за разлику од претходно разматраног `engagement_rate`, па оба атрибута оправдано остају у предикторском скупу.
+
+### Scatter plot анализа
+
+Scatter plot графикони приказују однос парова нумеричких варијабли на log-log скали.
+
+![Број прегледа vs. број лајкова](graphics/scatter_plot_1.png){width=80%}
+
+![Број прегледа vs. број коментара](graphics/scatter_plot_2.png){width=80%}
+
+![Број лајкова vs. број коментара](graphics/scatter_plot_3.png){width=80%}
+
+![Трајање vs. број прегледа](graphics/scatter_plot_4.png){width=80%}
+
+![Стопа лајкова vs. стопа коментара](graphics/scatter_plot_5.png){width=80%}
+
+\FloatBarrier
+
+Scatter plot `view_count` vs. `likes` и `view_count` vs. `comment_count` показују јасну линеарну везу на log-log скали, у складу са корелационом матрицом. Однос трајања и броја прегледа не показује јасан линеарни образац, што потврђује да `duration_seconds` носи независну информацију.
+
+### Однос категоријских и нумеричких обележја
+
+Boxplot графикони приказују расподелу нумеричких обележја унутар сваке категорије, омогућавајући увид у то да ли категорија видео записа утиче на обрасце популарности и ангажованости.
+
+![Број прегледа по категорији](graphics/ratio_plot_1.png){width=90%}
+
+![Број лајкова по категорији](graphics/ratio_plot_2.png){width=90%}
+
+![Број коментара по категорији](graphics/ratio_plot_3.png){width=90%}
+
+![Стопа лајкова по категорији](graphics/ratio_plot_4.png){width=90%}
+
+![Стопа коментара по категорији](graphics/ratio_plot_5.png){width=90%}
+
+![Трајање по категорији](graphics/ratio_plot_6.png){width=90%}
+
+\FloatBarrier
+
+Посматрајући дистрибуцију трајања видео записа, категорије попут „Travel & Events", „Autos & Vehicles" и „Gaming" имају најдуже видео записе, док се „Music" издваја са знатно краћим садржајем и уском расподелом. Категорија „Film & Animation" показује највећу варијабилност у трајању.
+
+„Music", „Entertainment" и „Comedy" категорије имају највећи број прегледа (`view_count`), док „Autos & Vehicles" бележи најмањи.
+
+Интересантан податак је да „Science & Technology" и „Comedy" остварују највише стопе лајковања (`like_rate`), упркос томе што нису на врху по броју прегледа. Ово указује на активну публику.
+
+# 4. Класификација
+
+## 4.1 Поставка проблема
+
+Циљно обележје је категорија YouTube видео записа (`category_name`). Ради се о вишекласној класификацији са **15 различитих класа**. Предиктори коришћени у свим моделима су: `view_count`, `likes`, `comment_count`, `duration_seconds`, `like_rate` и `comment_rate`.
+
+Атрибут `dislikes` је искључен због 68% недостајућих вредности. Текстуална поља (`title`, `tags`, `description`) нису укључена у анализу (видети одељак [2.4](#text-fields-sub)).
+
+Скуп података је подељен у односу 80/20 на тренинг и тест скуп, са фиксираним seed-ом ради поновљивости мерења. Исти seed је коришћен у све три класификационе методе ради конзистентности поређења.
+
+```{r podela, echo=TRUE, eval=FALSE}
+splits <- sdf_random_split(ml_data, training = 0.8, test = 0.2, seed = 42L)
+train_data <- sdf_persist(splits$training, storage.level = "MEMORY_AND_DISK")
+test_data  <- sdf_persist(splits$test,     storage.level = "MEMORY_AND_DISK")
+```
+
+За оцену перформанси коришћене су следеће метрике: **тачност** (accuracy), макро **прецизност** (precision), макро **осетљивост** (sensitivity) и макро **F1 скор**. Макро просек је одабран јер третира све класе равноправно, без обзира на величину, а с обзиром на изражену неуравнотеженост класа то је посебно значајно. Перформансе су процењене и путем 3-fold унакрсне валидације, имплементиране ручно над Spark DataFrame-овима.
+
+```{r cv_funkcija, echo=TRUE, eval=FALSE}
+build_cv_pipeline <- function(alpha, lambda, train_sdf, k = 3) {
+  fold_weights <- setNames(rep(1 / k, k), paste0("fold", seq_len(k)))
+  folds <- sdf_random_split(train_sdf, weights = fold_weights, seed = 42L)
+
+  fold_accuracies <- numeric(k)
+  for (i in seq_len(k)) {
+    val_fold   <- folds[[i]]
+    train_fold <- do.call(sdf_bind_rows, folds[-i])
+    fitted     <- ml_fit(pipeline, train_fold)
+    preds      <- ml_transform(fitted, val_fold) %>%
+      select(label, prediction) %>% collect()
+    fold_accuracies[i] <- mean(preds$label == preds$prediction)
+  }
+  mean(fold_accuracies)
+}
+```
+
+## 4.2 Логистичка регресија
+
+Примењена је мултиномијална логистичка регресија путем Spark ML `ml_logistic_regression` са параметром `family = "multinomial"`. Испитана су три сценарија варирањем параметра регуларизације `elastic_net_param` (α) и јачине регуларизације `reg_param` (λ):
+
+- **Сценарио 1:** L2 регуларизација (α = 0), λ = 0,001, слаба регуларизација, модел може да се боље прилагоди подацима
+- **Сценарио 2:** L2 регуларизација (α = 0), λ = 0,1, јача регуларизација, смањује ризик од оверфитинга
+- **Сценарио 3:** L1 регуларизација / Lasso (α = 1), λ = 0,01, уводи ретке тежине, потенцијално бирање обележја
+
+Предиктори су стандардизовани путем `ft_standard_scaler` јер је логистичка регресија са регуларизацијом осетљива на скалу улазних обележја.
+
+```{r lr_pipeline, echo=TRUE, eval=FALSE}
+pipeline <- ml_pipeline(sc) %>%
+  ft_string_indexer(input_col = "category_name", output_col = "label") %>%
+  ft_vector_assembler(input_cols = predictors, output_col = "features_raw") %>%
+  ft_standard_scaler(
+    input_col = "features_raw", output_col = "features",
+    with_mean = TRUE, with_std = TRUE
+  ) %>%
+  ml_logistic_regression(
+    features_col      = "features",
+    label_col         = "label",
+    elastic_net_param = alpha,  # 0 = L2 (Ridge), 1 = L1 (Lasso)
+    reg_param         = lambda,
+    max_iter          = 30,
+    family            = "multinomial"
+  )
+```
+
+![Поређење сценарија логистичке регресије](graphics/lr_plot_1.png){width=90%}
+
+![Матрица конфузије за најбољи сценарио LR](graphics/lr_plot_2.png){width=90%}
+
+![F1 по категорији ус најбољи сценарио LR](graphics/lr_plot_3.png){width=80%}
+
+\FloatBarrier
+
+## 4.3 Метод потпорних вектора (SVM)
+
+Примењен је линеарни SVM путем Spark ML `ml_linear_svc`. Будући да Spark ML имплементира искључиво бинарни SVM класификатор, за вишекласни проблем (15 категорија) коришћена је One-vs-Rest (OvR) стратегија: за сваку класу тренира се засебан бинарни класификатор (класа vs све остале класе), а финална предикција доноси се на основу највеће маргине.
+
+Испитана су три сценарија варирањем параметра L2 регуларизације `reg_param` и броја итерација `max_iter`:
+
+- **Сценарио 1:** reg_param = 0,001, max_iter = 5, слаба регуларизација, мање итерација
+- **Сценарио 2:** reg_param = 0,1, max_iter = 5, јача регуларизација, мање итерација
+- **Сценарио 3:** reg_param = 0,001, max_iter = 10, слаба регуларизација, више итерација
+
+Стандардизација је обавезна јер је SVM посебно осетљив на скалу улазних обележја.
+
+```{r svm_pipeline, echo=TRUE, eval=FALSE}
+pipeline <- ml_pipeline(sc) %>%
+  ft_string_indexer(input_col = "category_name", output_col = "label") %>%
+  ft_vector_assembler(input_cols = predictors, output_col = "features_raw") %>%
+  ft_standard_scaler(
+    input_col = "features_raw", output_col = "features",
+    with_mean = TRUE, with_std = TRUE
+  ) %>%
+  ml_one_vs_rest(
+    classifier = ml_linear_svc(
+      sc,
+      features_col = "features",
+      label_col    = "label",
+      reg_param    = reg_param,
+      max_iter     = max_iter
+    ),
+    features_col = "features",
+    label_col    = "label"
+  )
+```
+
+![Поређење сценарија — SVM](graphics/svm_plot_1.png){width=90%}
+
+![Матрица конфузије за најбољи сценарио SVM](graphics/svm_plot_2.png){width=90%}
+
+![F1 по категорији за најбољи сценарио SVM](graphics/svm_plot_3.png){width=80%}
+
+\FloatBarrier
+
+## 4.4 Random Forest
+
+Примењен је Random Forest путем Spark ML `ml_random_forest_classifier`, који директно подржава вишекласну класификацију без потребе за OvR стратегијом. Алгоритам гради ансамбл стабала одлучивања и комбинује њихове предикције гласањем.
+
+За разлику од LR и SVM, Random Forest не захтева стандардизацију улазних обележја. Такође, природно је робустан на неуравнотеженост класа јер сваки чвор стабла бира поделу која максимизује чистоћу класа независно.
+
+Испитана су три сценарија варирањем броја стабала `num_trees`, максималне дубине `max_depth` и минималног броја инстанци у листу `min_instances_per_node`:
+
+- **Сценарио 1:** num_trees = 50, max_depth = 5, min_inst = 1, основна линија
+- **Сценарио 2:** num_trees = 100, max_depth = 5, min_inst = 1, већи ансамбл, стабилнија предикција
+- **Сценарио 3:** num_trees = 50, max_depth = 8, min_inst = 5, max_bins = 16, комплекснији модел; `max_depth` је ограничен на 8 јер број чворова расте експоненцијално са дубином (2^depth), па би max_depth = 10 × 100 стабала изазвао OOM грешку на JVM heap-у
+
+```{r rf_pipeline, echo=TRUE, eval=FALSE}
+pipeline <- ml_pipeline(sc) %>%
+  ft_string_indexer(input_col = "category_name", output_col = "label") %>%
+  ft_vector_assembler(input_cols = predictors, output_col = "features") %>%
+  ml_random_forest_classifier(
+    features_col           = "features",
+    label_col              = "label",
+    num_trees              = num_trees,
+    max_depth              = max_depth,
+    min_instances_per_node = min_instances_per_node,
+    max_bins               = max_bins,
+    seed                   = 42L
+  )
+```
+
+Поред стандардних метрика, за Random Forest израчуната је и важност обележја (`feature importance`) на основу просечног смањења Gini нечистоће кроз сва стабла — ово је једна од кључних предности RF-а у односу на LR и SVM.
+
+```{r rf_importance, echo=TRUE, eval=FALSE}
+best_rf_model       <- ml_stages(best_rf$pipeline)[[3]]
+feature_importances <- ml_feature_importances(best_rf_model)
+
+fi_df <- data.frame(feature = predictors, importance = feature_importances) %>%
+  arrange(desc(importance))
+```
+
+![Поређење сценарија Random Forest](graphics/rf_plot_1.png){width=90%}
+
+![Матрица конфузије за најбољи сценарио RF](graphics/rf_plot_2.png){width=90%}
+
+![F1 по категорији за најбољи сценарио RF](graphics/rf_plot_3.png){width=80%}
+
+![Важност обележја за Random Forest](graphics/rf_plot_4.png){width=80%}
+
+\FloatBarrier
+
+## 4.5 Поређење и избор модела
+
+Резултати сва три алгоритма учитани су из сачуваних `.rds` фајлова без поновног тренирања, а затим упоређени по свим метрикама.
+
+```{r comparison_ucitavanje, echo=TRUE, eval=FALSE}
+lr_saved  <- readRDS("models/lr_best_results.rds")
+svm_saved <- readRDS("models/svm_best_results.rds")
+rf_saved  <- readRDS("models/rf_best_results.rds")
+```
+
+![Поређење алгоритама по кључним метрикама](graphics/cmp_plot_1.png){width=90%}
+
+Поред поређења метрика на тест скупу, анализирана је и **стабилност модела** кроз разлику између Cross-validation (CV) accuracy и test accuracy. Ове разлике су веома мале, што говори да није дошло до оверфитинга (слика 37).
+
+![Стабилност модела - CV accuracy vs. test accuracy](graphics/cmp_plot_2.png){width=80%}
+
+![Поређење F1 по категорији свих алгоритама](graphics/cmp_plot_3.png){width=80%}
+
+\FloatBarrier
+
+На основу резултата може се закључити да је Random Forest модел остварио најбоље перформансе у свим посматраним метрикама, са тачношћу ~0.33. Logistic Regression модел даје тачност ~0.27, док је SVM модел показао најслабије перформансе (~0.20).
+
+Добијене вредности метрика указују да је задатак класификације YouTube категорија на основу искључиво нумеричких атрибута релативно тежак, што је очекивано имајући у виду велики број класа и одсуство текстуалних информација. Укључивање текстуалних обележја (`title`, `tags`, `description`) и напредних NLP техника потенцијално би могло значајно побољшати перформансе модела.
+
+# 5. Кластеризација
+
+## 5.1 Поставка проблема
+
+Примењен је K-means алгоритам са циљем груписања YouTube видео записа на основу њихових нумеричких карактеристика и идентификације природних образаца у подацима.
+
+Коришћена су два скупа атрибута:
+
+- **Основни скуп:** `view_count`, `likes`, `comment_count`, `duration_seconds`, `like_rate`, `comment_rate` -- идентичан предикторском скупу из класификације
+- **Проширени скуп:** основни скуп + `trending_count` -- број пута колико је видео био trending. мери колико дуго је видео остао популаран и може раздвојити кластере краткорочних и дугорочних trending видео записа
+
+<!-- Напомена: PCA редукција димензионалности није примењена јер број атрибута (6–7) није довољно висок да би донела мерљиву корист. -->
+
+Пре примене алгоритма, атрибути су стандардизовани (mean = 0, std = 1) путем `ft_standard_scaler`, јер K-means користи еуклидску дистанцу. Атрибути са већим распоном (нпр. `view_count` ~ 10⁶) би без стандардизације доминирали над атрибутима са мањим распоном (нпр. `like_rate` ~ 0,01).
+
+```{r kmeans_pipeline, echo=TRUE, eval=FALSE}
+build_kmeans <- function(train_sdf, predictors, k, seed = 42L) {
+  prep_pipeline <- ml_pipeline(sc) %>%
+    ft_vector_assembler(
+      input_cols = predictors,
+      output_col = "features_raw"
+    ) %>%
+    ft_standard_scaler(
+      input_col = "features_raw", output_col = "features_scaled",
+      with_mean = TRUE, with_std = TRUE
+    )
+
+  prep_fitted <- ml_fit(prep_pipeline, train_sdf)
+  scaled_sdf  <- ml_transform(prep_fitted, train_sdf)
+
+  kmeans_model <- ml_kmeans(
+    scaled_sdf,
+    formula    = ~features_scaled,
+    k          = k,
+    seed       = seed,
+    max_iter   = 100L,
+    init_steps = 5L
+  )
+
+  predictions <- ml_predict(kmeans_model, scaled_sdf)
+  wcss        <- ml_summary(kmeans_model)$training_cost
+
+  list(pipeline = kmeans_model, predictions = predictions, wcss = wcss, k = k)
+}
+```
+
+## 5.2 Одређивање оптималног броја кластера помоћу Elbow методе
+
+Пре дефинисања сценарија, примењена је Elbow метода за одређивање оптималног броја кластера. K-means је покренут за вредности k од 2 до 10 на основном скупу атрибута, а праћена је вредност WCSS (within-cluster sum of squares).
+
+```{r elbow_kod, echo=TRUE, eval=FALSE}
+elbow_k_values <- 2:10
+elbow_wcss     <- numeric(length(elbow_k_values))
+
+for (i in seq_along(elbow_k_values)) {
+  result        <- build_kmeans(cluster_data, predictors_basic, k = elbow_k_values[i])
+  elbow_wcss[i] <- result$wcss
+}
+
+elbow_df <- data.frame(k = elbow_k_values, wcss = elbow_wcss)
+```
+
+![Elbow метода за одређивање оптималног k](graphics/kmeans_elbow_standard_scaler_k_4_6.png){width=85%}
+
+\FloatBarrier
+
+На основу Elbow графика одабране су вредности k = 4 и k = 6 за даљу анализу:
+
+- **k = 4** -- мањи број кластера; очекују се грубе групе по популарности (нпр. вирални, популарни, просечни, нишни видео записи)
+- **k = 6** -- већи број кластера; финија подела која може открити разлике унутар популарних категорија (кратак vs. дугачак садржај, висока vs. ниска стопа коментара)
+
+## 5.3 Сценарији кластеризације
+
+Испитана су четири сценарија комбинацијом два броја кластера и два скупа атрибута:
+
+- **Сценарио А:** k = 4, основни атрибути
+- **Сценарио Б:** k = 4, проширени атрибути
+- **Сценарио Ц:** k = 6, основни атрибути
+- **Сценарио Д:** k = 6, проширени атрибути
+
+```{r kmeans_scenariji, echo=TRUE, eval=FALSE}
+kmeans_scenarios <- list(
+  list(name = "Scenario A: k=4, basic features",
+       k = 4, predictors = predictors_basic, pred_label = "basic"),
+  list(name = "Scenario B: k=4, extended features",
+       k = 4, predictors = predictors_extended, pred_label = "extended"),
+  list(name = "Scenario C: k=6, basic features",
+       k = 6, predictors = predictors_basic, pred_label = "basic"),
+  list(name = "Scenario D: k=6, extended features",
+       k = 6, predictors = predictors_extended, pred_label = "extended")
+)
+```
+
+Поређење WCSS вредности свих сценарија приказано је на следећем графику. Очекивано, сценарији са k = 6 остварују нижи WCSS јер се са више кластера боље процењује структура података.
+
+Проширени скуп атрибута производи виши WCSS него основни при истом k, јер додатна димензија (`trending_count`) повећава укупну варијансу у простору.
+
+![Поређење WCSS по сценаријима](graphics/kmeans_wcss_comparison_standard_scaler_k_4_6.png){width=85%}
+
+\FloatBarrier
+
+## 5.4 Анализа структуре кластера
+
+За сваки сценарио анализиране су величине кластера и просечне вредности атрибута по кластеру. Просечне вредности су нормализоване на опсег [0, 1] по колонама ради поређења атрибута различитих скала.
+
+```{r kmeans_analiza, echo=TRUE, eval=FALSE}
+analyze_clusters <- function(predictions_sdf, predictors, k) {
+  cluster_sizes <- predictions_sdf %>%
+    count(prediction) %>% arrange(prediction) %>% collect()
+
+  cluster_means <- predictions_sdf %>%
+    group_by(prediction) %>%
+    summarise(across(all_of(predictors), mean, na.rm = TRUE), .groups = "drop") %>%
+    arrange(prediction) %>% collect()
+
+  list(cluster_sizes = cluster_sizes, cluster_means = cluster_means)
+}
+```
+
+## 5.5 Визуализација кластера
+
+### Scatter plot графикони
+
+Scatter plot графикони приказују расподелу видео записа у 2D простору (`view_count` vs. `like_rate`) са обојеним кластерима. Коришћен је 5% узорак ради перформанси визуализације.
+
+<!-- **Сценарио А -- k = 4, основни атрибути:** -->
+
+![Scatter plot кластера за Сценарио А](graphics/kmeans_scatter_basic_k4_sc.png){width=85%}
+
+<!-- **Сценарио Б -- k = 4, проширени атрибути:** -->
+
+![Scatter plot кластера за Сценарио Б](graphics/kmeans_scatter_extended_k4_sc.png){width=85%}
+
+<!-- **Сценарио Ц -- k = 6, основни атрибути:** -->
+
+![Scatter plot кластера за Сценарио Ц](graphics/kmeans_scatter_basic_k6_sc.png){width=85%}
+
+<!-- **Сценарио Д -- k = 6, проширени атрибути:** -->
+
+![Scatter plot кластера за Сценарио Д](graphics/kmeans_scatter_extended_k6_sc.png){width=85%}
+
+\FloatBarrier
+
+### Профили кластера (heatmap)
+
+Heatmap графикони приказују нормализоване просечне вредности атрибута по кластеру, омогућавајући интерпретацију карактера сваког кластера.
+
+<!-- **Сценарио А -- k = 4, основни атрибути:** -->
+
+![Профил кластера за Сценарио А](graphics/kmeans_heatmap_basic_k4_sc.png){width=85%}
+
+<!-- **Сценарио Б -- k = 4, проширени атрибути:** -->
+
+![Профил кластера за Сценарио Б](graphics/kmeans_heatmap_extended_k4_sc.png){width=85%}
+
+<!-- **Сценарио Ц -- k = 6, основни атрибути:** -->
+
+![Профил кластера за Сценарио Ц](graphics/kmeans_heatmap_basic_k6_sc.png){width=85%}
+
+<!-- **Сценарио Д -- k = 6, проширени атрибути:** -->
+
+![Профил кластера за Сценарио Д](graphics/kmeans_heatmap_extended_k6_sc.png){width=85%}
+
+\FloatBarrier
+
+Профили кластера откривају конзистентну структуру кроз све сценарије. У свим случајевима јасно се издваја мали кластер видео записа са изузетно великим бројем прегледа, лајкова и коментара (вирални садржај), као и кластер са високом стопом лајкова при ниском апсолутном броју прегледа (нишни, ангажован садржај). Остали кластери углавном представљају просечне видео записе, раздвојених претежно по трајању.
+
+У сценарију Д додавање `trending_count` атрибута довело је до формирања посебног кластера видео записа са умереним трендинг присуством и вишом стопом лајкова, што сугерише да дугорочно популарни видео записи имају другачији профил од краткорочно виралних.
