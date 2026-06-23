@@ -4,19 +4,19 @@ library(ggplot2)
 library(reshape2)
 
 # ===========================================================================
-# 4.5 Poređenje modela — međusobno poređenje najboljeg scenarija
-#     svakog klasifikacionog algoritma
+# 4.5 Model Comparison — comparison of the best scenario
+#     from each classification algorithm
 #
-# Ovaj fajl učitava sačuvane rezultate iz models/ foldera umesto da ponovo
-# trenira modele. Uslov je da su prethodno pokrenuti:
+# This script loads saved results from the models/ folder instead of retraining
+# models. It assumes that the following scripts were previously executed:
 #   - 03_classification_lr.R
 #   - 03_classification_svc.R
 #   - 03_classification_rf.R
-# koji čuvaju rezultate u models/lr_best_results.rds,...
+# which save results into models/lr_best_results.rds, etc.
 # ===========================================================================
 
 # ---------------------------------------------------------------------------
-# Učitavanje sačuvanih rezultata
+# Load saved results
 # ---------------------------------------------------------------------------
 lr_saved  <- readRDS("models/lr_best_results.rds")
 svm_saved <- readRDS("models/svm_best_results.rds")
@@ -26,18 +26,18 @@ best_lr_name  <- lr_saved$scenario
 best_svm_name <- svm_saved$scenario
 best_rf_name  <- rf_saved$scenario
 
-cat("Učitani modeli:\n")
+cat("Loaded models:\n")
 cat(sprintf("  LR:  %s\n", best_lr_name))
 cat(sprintf("  SVM: %s\n", best_svm_name))
 cat(sprintf("  RF:  %s\n", best_rf_name))
 
 # ---------------------------------------------------------------------------
-# Tabela poređenja — jedan red po algoritmu (najbolji scenario svakog)
+# Comparison table — one row per algorithm (best scenario per model)
 # ---------------------------------------------------------------------------
 comparison_table <- data.frame(
-  algoritam       = c("Logistička regresija", "SVM (One-vs-Rest)", "Random Forest"),
-  scenario        = c(best_lr_name, best_svm_name, best_rf_name),
-  accuracy        = round(c(
+  algorithm      = c("Logistic Regression", "SVM (One-vs-Rest)", "Random Forest"),
+  scenario       = c(best_lr_name, best_svm_name, best_rf_name),
+  accuracy       = round(c(
     lr_saved$metrics$accuracy,
     svm_saved$metrics$accuracy,
     rf_saved$metrics$accuracy
@@ -64,85 +64,86 @@ comparison_table <- data.frame(
   ), 4)
 )
 
-cat("\n=== Poređenje najboljeg scenarija svakog algoritma ===\n")
+cat("\n=== Comparison of best scenario per algorithm ===\n")
 print(comparison_table)
 
 # ---------------------------------------------------------------------------
-# Identifikacija ukupno najboljeg modela (po Macro F1)
+# Identify overall best model (by Macro F1)
 # ---------------------------------------------------------------------------
 best_overall_idx  <- which.max(comparison_table$macro_f1)
-best_overall_name <- comparison_table$algoritam[best_overall_idx]
+best_overall_name <- comparison_table$algorithm[best_overall_idx]
 
 cat(sprintf(
-  "\nUkupno najbolji model: %s (Macro F1 = %.4f, Accuracy = %.4f)\n",
+  "\nOverall best model: %s (Macro F1 = %.4f, Accuracy = %.4f)\n",
   best_overall_name,
   comparison_table$macro_f1[best_overall_idx],
   comparison_table$accuracy[best_overall_idx]
 ))
 
 # ---------------------------------------------------------------------------
-# Analiza stabilnosti: razlika između CV accuracy i test accuracy
+# Stability analysis: difference between CV accuracy and test accuracy
 #
-# Velika razlika (CV >> test) signalizuje overfit.
-# Mala razlika potvrđuje da model dobro generalizuje.
+# Large gap (CV >> test) indicates overfitting.
+# Small gap indicates good generalization.
 # ---------------------------------------------------------------------------
-comparison_table$generalizacija <- round(
+comparison_table$generalization <- round(
   comparison_table$cv_accuracy - comparison_table$accuracy, 4
 )
 
-cat("\nAnaliza generalizacije (CV accuracy − test accuracy):\n")
-print(comparison_table[, c("algoritam", "cv_accuracy", "accuracy", "generalizacija")])
+cat("\nGeneralization analysis (CV accuracy - test accuracy):\n")
+print(comparison_table[, c("algorithm", "cv_accuracy", "accuracy", "generalization")])
 
 # ---------------------------------------------------------------------------
-# Vizualizacija 1: Poređenje metrika po algoritmu
+# Visualization 1: Metric comparison by algorithm
 # ---------------------------------------------------------------------------
 cmp_plot_data <- melt(
   comparison_table[, c(
-    "algoritam", "accuracy", "macro_f1",
+    "algorithm", "accuracy", "macro_f1",
     "macro_precision", "macro_recall"
   )],
-  id.vars      = "algoritam",
-  variable.name = "metrika",
-  value.name    = "vrednost"
+  id.vars = "algorithm",
+  variable.name = "metric",
+  value.name = "value"
 )
 
 cmp_plot_1 <- ggplot(
   cmp_plot_data,
-  aes(x = algoritam, y = vrednost, fill = metrika)
+  aes(x = algorithm, y = value, fill = metric)
 ) +
   geom_col(position = "dodge") +
   ylim(0, 1) +
   labs(
-    title = "Poređenje algoritama — ključne metrike (najbolji scenario)",
-    x     = "Algoritam",
-    y     = "Vrednost metrike",
-    fill  = "Metrika"
+    title = "Algorithm Comparison - Key Metrics (Best Scenario)",
+    x     = "Algorithm",
+    y     = "Metric Value",
+    fill  = "Metric"
   ) +
   theme_minimal() +
   theme(axis.text.x = element_text(angle = 15, hjust = 1))
 
 # ---------------------------------------------------------------------------
-# Vizualizacija 2: CV accuracy vs. test accuracy (stabilnost modela)
+# Visualization 2: CV accuracy vs test accuracy (model stability)
 # ---------------------------------------------------------------------------
 stability_data <- melt(
-  comparison_table[, c("algoritam", "cv_accuracy", "accuracy")],
-  id.vars      = "algoritam",
-  variable.name = "tip",
-  value.name    = "vrednost"
+  comparison_table[, c("algorithm", "cv_accuracy", "accuracy")],
+  id.vars = "algorithm",
+  variable.name = "type",
+  value.name = "value"
 )
-stability_data$tip <- ifelse(
-  stability_data$tip == "cv_accuracy", "CV Accuracy", "Test Accuracy"
+
+stability_data$type <- ifelse(
+  stability_data$type == "cv_accuracy", "CV Accuracy", "Test Accuracy"
 )
 
 cmp_plot_2 <- ggplot(
   stability_data,
-  aes(x = algoritam, y = vrednost, fill = tip)
+  aes(x = algorithm, y = value, fill = type)
 ) +
   geom_col(position = "dodge") +
   ylim(0, 1) +
   labs(
-    title = "Stabilnost modela — CV accuracy vs. test accuracy",
-    x     = "Algoritam",
+    title = "Model Stability - CV Accuracy vs Test Accuracy",
+    x     = "Algorithm",
     y     = "Accuracy",
     fill  = ""
   ) +
@@ -150,29 +151,29 @@ cmp_plot_2 <- ggplot(
   theme(axis.text.x = element_text(angle = 15, hjust = 1))
 
 # ---------------------------------------------------------------------------
-# Vizualizacija 3: F1 po kategoriji — sva tri algoritma uporedo
+# Visualization 3: F1 per category — all three algorithms compared
 #
-# Spajaju se per_class data.frame-ovi sva tri najbolja scenarija kako bi se
-# videlo za koje kategorije koji algoritam bolje radi.
+# Combine per_class data.frames from all best models to see which algorithm
+# performs better for each category.
 # ---------------------------------------------------------------------------
 per_class_combined <- rbind(
-  cbind(lr_saved$metrics$per_class,  algoritam = "Logistička regresija"),
-  cbind(svm_saved$metrics$per_class, algoritam = "SVM (One-vs-Rest)"),
-  cbind(rf_saved$metrics$per_class,  algoritam = "Random Forest")
+  cbind(lr_saved$metrics$per_class,  algorithm = "Logistic Regression"),
+  cbind(svm_saved$metrics$per_class, algorithm = "SVM (One-vs-Rest)"),
+  cbind(rf_saved$metrics$per_class,  algorithm = "Random Forest")
 )
 
 cmp_plot_3 <- ggplot(
   per_class_combined,
-  aes(x = reorder(class, f1), y = f1, fill = algoritam)
+  aes(x = reorder(class, f1), y = f1, fill = algorithm)
 ) +
   geom_col(position = "dodge") +
   coord_flip() +
   ylim(0, 1) +
   labs(
-    title = "F1 po kategoriji — poređenje algoritama",
-    x     = "Kategorija",
-    y     = "F1 skor",
-    fill  = "Algoritam"
+    title = "F1 Score per Category - Algorithm Comparison",
+    x     = "Category",
+    y     = "F1 Score",
+    fill  = "Algorithm"
   ) +
   theme_minimal()
 

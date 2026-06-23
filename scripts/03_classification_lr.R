@@ -9,18 +9,18 @@ sc <- spark_connect(master = "local[*]")
 youtube_data <- load_youtube_data(sc)
 
 # ===========================================================================
-# 4. Klasifikacija
+# 4. Classification
 # ===========================================================================
-# Ciljno obeležje: category_name (višeklasna klasifikacija)
-# Prediktori: view_count, likes, comment_count, duration_seconds,
+# Target variable: category_name (multiclass classification)
+# Predictors: view_count, likes, comment_count, duration_seconds,
 #             like_rate, comment_rate
 # ===========================================================================
 
 # ---------------------------------------------------------------------------
-# Priprema podataka za klasifikaciju
+# Data preparation for classification
 # ---------------------------------------------------------------------------
 
-# Uklanjanje kategorija sa premalo zapisa
+# Removing categories with too few samples
 min_samples <- 50
 category_counts <- youtube_data %>%
   count(category_name) %>%
@@ -46,43 +46,33 @@ ml_data <- youtube_data %>%
     like_rate, comment_rate
   )
 
-print("Distribucija klasa:")
+print("Class distribution:")
 ml_data %>%
   count(category_name, sort = TRUE) %>%
   print()
-print(paste("Ukupan broj zapisa:", sdf_nrow(ml_data)))
+
+print(paste("Total number of records:", sdf_nrow(ml_data)))
 
 # ---------------------------------------------------------------------------
 # 80/20 train/test split
-#
 # ---------------------------------------------------------------------------
 splits <- sdf_random_split(ml_data, training = 0.8, test = 0.2, seed = 42L)
-train_data <- splits$training
-test_data <- splits$test
+train_data <- sdf_persist(splits$training, storage.level = "MEMORY_AND_DISK")
+test_data  <- sdf_persist(splits$test,     storage.level = "MEMORY_AND_DISK")
 
-train_data <- sdf_persist(
-  train_data,
-  storage.level = "MEMORY_AND_DISK"
-)
-
-test_data <- sdf_persist(
-  test_data,
-  storage.level = "MEMORY_AND_DISK"
-)
-
-print(paste("Train skup:", sdf_nrow(train_data), "zapisa"))
-print(paste("Test skup: ", sdf_nrow(test_data), "zapisa"))
+print(paste("Train set:", sdf_nrow(train_data), "records"))
+print(paste("Test set:", sdf_nrow(test_data), "records"))
 
 # ---------------------------------------------------------------------------
-# Spark ML Pipeline — zajednički koraci za sve scenarije
+# Spark ML Pipeline — shared preprocessing steps
 #
-# Tok podataka:
+# Data flow:
 #   [Spark DataFrame]
-#       → ft_string_indexer  (category_name → label)
-#       → ft_vector_assembler (prediktori → features vektor)
-#       → ft_standard_scaler  (skaliranje features vektora)
+#       → ft_string_indexer   (category_name → label)
+#       → ft_vector_assembler (features → feature vector)
+#       → ft_standard_scaler  (feature scaling)
 #       → ml_logistic_regression
-#       → predikcija na test skupu
+#       → prediction on test set
 # ---------------------------------------------------------------------------
 
 predictors <- c(
@@ -91,45 +81,46 @@ predictors <- c(
 )
 
 # ---------------------------------------------------------------------------
-# Pomocna funkcija za racunanje metrika iz Spark predikcija
+# Helper function for computing metrics from Spark predictions
 # ---------------------------------------------------------------------------
 compute_metrics_spark <- function(predictions_df) {
   pred_local <- predictions_df
-
+  
   classes <- sort(unique(pred_local$category_name))
-
-  # Matrica konfuzije
+  
+  # Confusion matrix
   cm_table <- table(
     Prediction = pred_local$predicted_label,
     Reference  = pred_local$category_name
   )
-
-  # Metrike po klasi
+  
+  # Per-class metrics
   per_class <- lapply(classes, function(cls) {
     if (!(cls %in% rownames(cm_table))) {
       return(data.frame(class = cls, precision = 0, recall = 0, f1 = 0))
     }
     tp <- ifelse(cls %in% rownames(cm_table) & cls %in% colnames(cm_table),
-      cm_table[cls, cls], 0
+                 cm_table[cls, cls], 0
     )
     fp <- sum(cm_table[cls, ]) - tp
     fn <- ifelse(cls %in% colnames(cm_table),
-      sum(cm_table[, cls]), 0
+                 sum(cm_table[, cls]), 0
     ) - tp
     precision <- ifelse((tp + fp) == 0, 0, tp / (tp + fp))
     recall <- ifelse((tp + fn) == 0, 0, tp / (tp + fn))
     f1 <- ifelse((precision + recall) == 0, 0,
-      2 * precision * recall / (precision + recall)
+                 2 * precision * recall / (precision + recall)
     )
     data.frame(class = cls, precision = precision, recall = recall, f1 = f1)
   })
+  
   per_class_df <- do.call(rbind, per_class)
-
+  
   accuracy <- mean(pred_local$category_name == pred_local$predicted_label)
   macro_prec <- mean(per_class_df$precision)
   macro_rec <- mean(per_class_df$recall)
   macro_f1 <- mean(per_class_df$f1)
-
+  
   list(
     per_class       = per_class_df,
     cm_table        = cm_table,
@@ -151,12 +142,12 @@ print_metrics <- function(metrics, scenario_name, cv_accuracy = NULL) {
   if (!is.null(cv_accuracy)) {
     cat(sprintf("CV Accuracy:      %.4f\n", cv_accuracy))
   }
-  cat("\nMetrike po klasama:\n")
+  cat("\nPer-class metrics:\n")
   print(metrics$per_class)
 }
 
 # ---------------------------------------------------------------------------
-# Pomocna funkcija za izgradnju i evaluaciju Spark ML pipeline-a
+# Helper function to build and evaluate Spark ML pipeline
 # ---------------------------------------------------------------------------
 build_and_evaluate <- function(train_sdf, test_sdf, alpha, lambda, scenario_name) {
   pipeline <- ml_pipeline(sc) %>%
@@ -177,27 +168,24 @@ build_and_evaluate <- function(train_sdf, test_sdf, alpha, lambda, scenario_name
     ml_logistic_regression(
       features_col      = "features",
       label_col         = "label",
-      elastic_net_param = alpha, # 0 = L2 (Ridge), 1 = L1 (Lasso)
-      reg_param         = lambda, # jačina regularizacije
+      elastic_net_param = alpha,
+      reg_param         = lambda,
       max_iter          = 30,
       family            = "multinomial"
     )
-
-  # Treniranje
+  
   fitted_pipeline <- ml_fit(pipeline, train_sdf)
-
-  # Predikcija na test skupu
+  
   predictions <- ml_transform(fitted_pipeline, test_sdf)
-
-  # Mapiranje indeks → naziv klase (string_indexer dodeljuje indekse po frekvenciji)
+  
   string_indexer_model <- ml_stages(fitted_pipeline)[[1]]
   labels_metadata <- ml_labels(string_indexer_model)
-
+  
   predictions_local <- predictions %>%
     select(category_name, prediction) %>%
     collect() %>%
     mutate(predicted_label = labels_metadata[as.integer(prediction) + 1])
-
+  
   list(
     pipeline = fitted_pipeline,
     predictions = predictions_local
@@ -205,12 +193,12 @@ build_and_evaluate <- function(train_sdf, test_sdf, alpha, lambda, scenario_name
 }
 
 # ===========================================================================
-# 4.1 Logistička regresija — multinomijalna (Spark ML)
+# 4.1 Multinomial Logistic Regression (Spark ML)
 #
-# Tri scenarija:
-#   Scenario 1: L2 regularizacija (alpha=0), lambda=0.001 (slaba regularizacija)
-#   Scenario 2: L2 regularizacija (alpha=0), lambda=0.1   (jača regularizacija)
-#   Scenario 3: L1 regularizacija (alpha=1), lambda=0.01  (Lasso)
+# Three scenarios:
+#   Scenario 1: L2 regularization (alpha=0), lambda=0.001 (weak regularization)
+#   Scenario 2: L2 regularization (alpha=0), lambda=0.1   (strong regularization)
+#   Scenario 3: L1 regularization (alpha=1), lambda=0.01  (Lasso)
 # ===========================================================================
 
 lr_scenarios <- list(
@@ -220,20 +208,18 @@ lr_scenarios <- list(
 )
 
 # ---------------------------------------------------------------------------
-# k-fold unakrsna validacija putem Spark ML CrossValidator
+# k-fold cross-validation (manual implementation in Spark ML)
 # ---------------------------------------------------------------------------
 build_cv_pipeline <- function(alpha, lambda, train_sdf, k = 3) {
-  # Podeli train skup na k fold-ova
   fold_weights <- setNames(rep(1 / k, k), paste0("fold", seq_len(k)))
   folds <- sdf_random_split(train_sdf, weights = fold_weights, seed = 42L)
-
+  
   fold_accuracies <- numeric(k)
-
+  
   for (i in seq_len(k)) {
-    # i-ti fold je validacioni, ostali su trening
     val_fold <- folds[[i]]
     train_fold <- do.call(sdf_bind_rows, folds[-i])
-
+    
     pipeline <- ml_pipeline(sc) %>%
       ft_string_indexer(input_col = "category_name", output_col = "label") %>%
       ft_vector_assembler(input_cols = predictors, output_col = "features_raw") %>%
@@ -249,41 +235,39 @@ build_cv_pipeline <- function(alpha, lambda, train_sdf, k = 3) {
         max_iter          = 30,
         family            = "multinomial"
       )
-
+    
     fitted <- ml_fit(pipeline, train_fold)
     preds <- ml_transform(fitted, val_fold) %>%
       select(label, prediction) %>%
       collect()
-
+    
     fold_accuracies[i] <- mean(preds$label == preds$prediction)
     cat(sprintf("  Fold %d accuracy: %.4f\n", i, fold_accuracies[i]))
-
+    
     rm(fitted, preds)
     gc()
   }
-
+  
   mean(fold_accuracies)
 }
 
 lr_results <- list()
 
 for (sc_params in lr_scenarios) {
-  cat("\n--- Treniranje:", sc_params$name, "---\n")
-
-  # Ručna k-fold unakrsna validacija
+  cat("\n--- Training:", sc_params$name, "---\n")
+  
   cv_accuracy <- build_cv_pipeline(sc_params$alpha, sc_params$lambda, train_data, k = 3)
-  cat(sprintf("CV Accuracy (5-fold): %.4f\n", cv_accuracy))
-
-  # Treniranje i evaluacija na test skupu
+  cat(sprintf("CV Accuracy (k-fold): %.4f\n", cv_accuracy))
+  
   result <- build_and_evaluate(
     train_data, test_data,
     sc_params$alpha, sc_params$lambda,
     sc_params$name
   )
-
+  
   metrics <- compute_metrics_spark(result$predictions)
   print_metrics(metrics, sc_params$name, cv_accuracy)
-
+  
   lr_results[[sc_params$name]] <- list(
     pipeline    = result$pipeline,
     predictions = result$predictions,
@@ -294,7 +278,7 @@ for (sc_params in lr_scenarios) {
 }
 
 # ---------------------------------------------------------------------------
-# Poređenje scenarija i izbor najboljeg modela logističke regresije
+# Comparison of scenarios and best model selection
 # ---------------------------------------------------------------------------
 lr_comparison <- do.call(rbind, lapply(names(lr_results), function(nm) {
   m <- lr_results[[nm]]$metrics
@@ -308,39 +292,37 @@ lr_comparison <- do.call(rbind, lapply(names(lr_results), function(nm) {
   )
 }))
 
-cat("\n=== Poređenje scenarija — Logistička regresija ===\n")
+cat("\n=== Logistic Regression Scenario Comparison ===\n")
 print(lr_comparison)
 
 best_lr_name <- lr_comparison$scenario[which.max(lr_comparison$macro_f1)]
 best_lr <- lr_results[[best_lr_name]]
 cat(sprintf(
-  "\nNajbolji scenario LR: %s (Macro F1 = %.4f)\n",
+  "\nBest LR scenario: %s (Macro F1 = %.4f)\n",
   best_lr_name, max(lr_comparison$macro_f1)
 ))
 
 # ---------------------------------------------------------------------------
-# Vizualizacija rezultata logističke regresije
+# Visualization of logistic regression results
 # ---------------------------------------------------------------------------
 
-# Poređenje metrika po scenarijima
 lr_plot_data <- melt(
   lr_comparison[, c("scenario", "accuracy", "macro_f1", "macro_precision", "macro_recall")],
   id.vars = "scenario",
-  variable.name = "metrika",
-  value.name = "vrednost"
+  variable.name = "metric",
+  value.name = "value"
 )
 
-lr_plot_1 <- ggplot(lr_plot_data, aes(x = scenario, y = vrednost, fill = metrika)) +
+lr_plot_1 <- ggplot(lr_plot_data, aes(x = scenario, y = value, fill = metric)) +
   geom_col(position = "dodge") +
   coord_flip() +
   ylim(0, 1) +
   labs(
-    title = "Logistička regresija — poređenje scenarija",
-    x = "Scenario", y = "Vrednost metrike", fill = "Metrika"
+    title = "Logistic Regression scenario comparison",
+    x = "Scenario", y = "Metric Value", fill = "Metric"
   ) +
   theme_minimal()
 
-# Matrica konfuzije najboljeg scenarija
 best_cm_df <- as.data.frame(best_lr$metrics$cm_table)
 
 lr_plot_2 <- ggplot(best_cm_df, aes(x = Reference, y = Prediction, fill = Freq)) +
@@ -350,18 +332,17 @@ lr_plot_2 <- ggplot(best_cm_df, aes(x = Reference, y = Prediction, fill = Freq))
   theme_minimal() +
   theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
   labs(
-    title = paste("Matrica konfuzije —", best_lr_name),
-    x = "Stvarna klasa", y = "Predviđena klasa"
+    title = paste("Confusion Matrix ", best_lr_name),
+    x = "True Class", y = "Predicted Class"
   )
 
-# F1 po klasama za najbolji scenario
 lr_plot_3 <- ggplot(best_lr$metrics$per_class, aes(x = reorder(class, f1), y = f1)) +
   geom_col(fill = "steelblue") +
   coord_flip() +
   ylim(0, 1) +
   labs(
-    title = paste("F1 po kategoriji —", best_lr_name),
-    x = "Kategorija", y = "F1 skor"
+    title = paste("F1 Score per Category ", best_lr_name),
+    x = "Category", y = "F1 Score"
   ) +
   theme_minimal()
 
@@ -371,12 +352,9 @@ save_plot(lr_plot_2, "lr_plot_2")
 save_plot(lr_plot_3, "lr_plot_3")
 
 # ---------------------------------------------------------------------------
-# Čuvanje rezultata najboljeg modela na disk
-#
-# saveRDS čuva R objekte (metrike, predikcije, naziv scenarija) kako bi
-# bili dostupni u comparison fajlu bez ponovnog treniranja.
-#
+# Save best model results to disk
 # ---------------------------------------------------------------------------
+
 saveRDS(
   list(
     metrics     = best_lr$metrics,
@@ -387,4 +365,6 @@ saveRDS(
   file = "models/lr_best_results.rds"
 )
 
-cat(sprintf("Rezultati sačuvani: models/lr_best_results.rds\n"))
+cat(sprintf("Saved results: models/lr_best_results.rds\n"))
+
+spark_disconnect(sc)

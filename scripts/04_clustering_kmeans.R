@@ -9,11 +9,11 @@ sc <- spark_connect(master = "local[*]")
 youtube_data <- load_youtube_data(sc)
 
 # ===========================================================================
-# 5. Klasterizacija — K-means
+# 5. Clustering — K-means
 # ===========================================================================
 
 # ---------------------------------------------------------------------------
-# Priprema podataka
+# Data preparation
 # ---------------------------------------------------------------------------
 cluster_data <- youtube_data %>%
   filter(
@@ -28,13 +28,13 @@ cluster_data <- youtube_data %>%
 
 cluster_data <- sdf_persist(cluster_data, storage.level = "MEMORY_AND_DISK")
 
-print(paste("Ukupan broj zapisa za klasterizaciju:", sdf_nrow(cluster_data)))
+print(paste("Total number of records for clustering:", sdf_nrow(cluster_data)))
 
-# Dva skupa atributa:
-#   predictors_basic    - isti skup kao u klasifikaciji
-#   predictors_extended - dodaje trending_count koji meri koliko dugo je
-#                         video ostao popularan, što može razdvojiti klastere
-#                         kratkoročnih i dugoročnih trending video zapisa
+# Two feature sets:
+#   predictors_basic    - same feature set as in classification
+#   predictors_extended - adds trending_count, which measures how long
+#                         a video remained popular and may separate clusters
+#                         of short-term and long-term trending videos
 predictors_basic <- c(
   "view_count", "likes", "comment_count",
   "duration_seconds", "like_rate", "comment_rate"
@@ -46,57 +46,57 @@ predictors_extended <- c(
 )
 
 # ---------------------------------------------------------------------------
-# Definicija scenarija
+# Scenario definitions
 #
-# k=4  — manji broj klastera; očekuivane grube grupe po popularnosti
-#         (npr. viralni, popularni, prosečni, nišni video zapisi)
-# k=6  — veći broj klastera; finija podela koja može otkriti
-#         razlike unutar popularnih kategorija (kratki vs. dugi sadržaj,
-#         visoka vs. niska stopa komentara,...)
+# k=4  — smaller number of clusters; expected coarse groups by popularity
+#         (e.g. viral, popular, average, niche videos)
+# k=6  — larger number of clusters; finer partitioning that may reveal
+#         differences within popular categories (short vs. long content,
+#         high vs. low comment rate, ...)
 # ---------------------------------------------------------------------------
 kmeans_scenarios <- list(
   list(
-    name       = "Scenario A: k=4, osnovni atributi",
+    name       = "Scenario A: k=4, basic features",
     k          = 4,
     predictors = predictors_basic,
-    pred_label = "osnovni"
+    pred_label = "basic"
   ),
   list(
-    name       = "Scenario B: k=4, prošireni atributi",
+    name       = "Scenario B: k=4, extended features",
     k          = 4,
     predictors = predictors_extended,
-    pred_label = "prosireni"
+    pred_label = "extended"
   ),
   list(
-    name       = "Scenario C: k=6, osnovni atributi",
+    name       = "Scenario C: k=6, basic features",
     k          = 6,
     predictors = predictors_basic,
-    pred_label = "osnovni"
+    pred_label = "basic"
   ),
   list(
-    name       = "Scenario D: k=6, prošireni atributi",
+    name       = "Scenario D: k=6, extended features",
     k          = 6,
     predictors = predictors_extended,
-    pred_label = "prosireni"
+    pred_label = "extended"
   )
 )
 
 # ---------------------------------------------------------------------------
-# Pomocna funkcija: izgradnja i evaluacija K-means modela
+# Helper function: build and evaluate K-means model
 #
 # Pipeline:
-#   ft_vector_assembler → spaja atribute u features vektor
-#   ft_standard_scaler  → standardizacija - obavezna za
-#                         K-means jer algoritam koristi euklidsku distancu.
-#                         Atributi sa većim rasponom (view_count ~ 10^6)
-#                         bi dominirali nad atributima sa manjim rasponom
-#                         (like_rate ~ 0.01) bez standardizacije
-#   ml_kmeans           → K-means klasterizacija
+#   ft_vector_assembler → combines attributes into a feature vector
+#   ft_standard_scaler  → standardization is required for K-means because
+#                         the algorithm relies on Euclidean distance.
+#                         Features with larger ranges (view_count ~ 10^6)
+#                         would dominate features with smaller ranges
+#                         (like_rate ~ 0.01) without standardization
+#   ml_kmeans           → K-means clustering
 #
-# Vraća: fitted model, predikcije, within-cluster sum of squares (WCSS)
+# Returns: fitted model, predictions, within-cluster sum of squares (WCSS)
 # ---------------------------------------------------------------------------
 build_kmeans <- function(train_sdf, predictors, k, seed = 42L) {
-  # Korak 1: assembler + scaler
+  # Step 1: assembler + scaler
   prep_pipeline <- ml_pipeline(sc) %>%
     ft_vector_assembler(
       input_cols = predictors,
@@ -116,7 +116,7 @@ build_kmeans <- function(train_sdf, predictors, k, seed = 42L) {
   prep_fitted <- ml_fit(prep_pipeline, train_sdf)
   scaled_sdf <- ml_transform(prep_fitted, train_sdf)
 
-  # Korak 2: K-means na standardizovanim atributima
+  # Step 2: K-means on standardized features
   kmeans_model <- ml_kmeans(scaled_sdf,
     formula    = ~features_scaled,
     k          = k,
@@ -138,16 +138,16 @@ build_kmeans <- function(train_sdf, predictors, k, seed = 42L) {
 }
 
 # ---------------------------------------------------------------------------
-# Pomocna funkcija: analiza strukture klastera
+# Helper function: cluster structure analysis
 # ---------------------------------------------------------------------------
 analyze_clusters <- function(predictions_sdf, predictors, k) {
-  # Broj elemenata po klasteru
+  # Number of instances per cluster
   cluster_sizes <- predictions_sdf %>%
     count(prediction) %>%
     arrange(prediction) %>%
     collect()
 
-  # Prosečne vrednosti originalnih atributa po klasteru
+  # Mean values of original features per cluster
   cluster_means <- predictions_sdf %>%
     group_by(prediction) %>%
     summarise(
@@ -164,16 +164,16 @@ analyze_clusters <- function(predictions_sdf, predictors, k) {
 }
 
 # ---------------------------------------------------------------------------
-# Elbow metoda — određivanje optimalnog k za osnovni skup atributa
+# Elbow method — determining the optimal k for the basic feature set
 # ---------------------------------------------------------------------------
-cat("\n=== Elbow metoda (osnovni skup atributa) ===\n")
+cat("\n=== Elbow method (basic feature set) ===\n")
 
 elbow_k_values <- 2:10
 elbow_wcss <- numeric(length(elbow_k_values))
 
 for (i in seq_along(elbow_k_values)) {
   k_val <- elbow_k_values[i]
-  cat(sprintf("  Treniranje K-means za k=%d ...\n", k_val))
+  cat(sprintf("  Training K-means for k=%d ...\n", k_val))
 
   result <- build_kmeans(cluster_data, predictors_basic, k = k_val)
   elbow_wcss[i] <- result$wcss
@@ -184,7 +184,7 @@ for (i in seq_along(elbow_k_values)) {
 }
 
 elbow_df <- data.frame(k = elbow_k_values, wcss = elbow_wcss)
-cat("\nElbow tabela:\n")
+cat("\nElbow table:\n")
 print(elbow_df)
 
 elbow_plot <- ggplot(elbow_df, aes(x = k, y = wcss)) +
@@ -192,8 +192,8 @@ elbow_plot <- ggplot(elbow_df, aes(x = k, y = wcss)) +
   geom_point(color = "steelblue", size = 3) +
   scale_x_continuous(breaks = elbow_k_values) +
   labs(
-    title = "Elbow metoda — određivanje optimalnog k",
-    x     = "Broj klastera (k)",
+    title = "Elbow Method - Determining Optimal k",
+    x     = "Number of clusters (k)",
     y     = "WCSS (within-cluster sum of squares)"
   ) +
   theme_minimal()
@@ -202,7 +202,7 @@ source("scripts/save_plot.R")
 save_plot(elbow_plot, "kmeans_elbow_standard_scaler_k_4_6")
 
 # ===========================================================================
-# Pokretanje svih scenarija
+# Run all scenarios
 # ===========================================================================
 kmeans_results <- list()
 
@@ -224,9 +224,9 @@ for (sc_params in kmeans_scenarios) {
   )
 
   cat(sprintf("WCSS: %.2f\n", result$wcss))
-  cat("Veličine klastera:\n")
+  cat("Cluster sizes:\n")
   print(analysis$cluster_sizes)
-  cat("Prosečne vrednosti po klasteru:\n")
+  cat("Cluster mean values:\n")
   print(analysis$cluster_means)
 
   kmeans_results[[result_key]] <- list(
@@ -241,7 +241,7 @@ for (sc_params in kmeans_scenarios) {
 }
 
 # ---------------------------------------------------------------------------
-# 5.3 Pregled WCSS vrednosti svih kombinacija
+# 5.3 Overview of WCSS values for all combinations
 # ---------------------------------------------------------------------------
 wcss_summary <- do.call(rbind, lapply(names(kmeans_results), function(nm) {
   r <- kmeans_results[[nm]]
@@ -254,15 +254,15 @@ wcss_summary <- do.call(rbind, lapply(names(kmeans_results), function(nm) {
   )
 }))
 
-cat("\n=== Pregled WCSS po svim scenarijima ===\n")
+cat("\n=== WCSS overview across all scenarios ===\n")
 print(wcss_summary)
 
 # ===========================================================================
-# 5.4 Vizualizacije
+# 5.4 Visualizations
 # ===========================================================================
 
 # ---------------------------------------------------------------------------
-# Vizualizacija 1: Poređenje WCSS po scenarijima
+# Visualization 1: WCSS comparison across scenarios
 # ---------------------------------------------------------------------------
 wcss_plot <- ggplot(
   wcss_summary,
@@ -271,20 +271,20 @@ wcss_plot <- ggplot(
   geom_col(position = "dodge") +
   coord_flip() +
   labs(
-    title = "Poređenje WCSS po scenarijima",
+    title = "WCSS Comparison Across Scenarios",
     x     = "Scenario",
     y     = "WCSS",
-    fill  = "Skup atributa"
+    fill  = "Feature set"
   ) +
   theme_minimal()
 
 save_plot(wcss_plot, "kmeans_wcss_comparison_standard_scaler_k_4_6", width = 10, height = 5)
 
 # ---------------------------------------------------------------------------
-# Vizualizacija 2-5: Scatter plot klastera u 2D prostoru
+# Visualization 2–5: Cluster scatter plots in 2D space
 #
-# Koristi se uzorak radi performansi (scatter plot sa milionima tačaka
-# je neupotrebljiv).
+# Sampling is used for performance reasons
+# (scatter plots with millions of points are impractical).
 # ---------------------------------------------------------------------------
 plot_clusters_2d <- function(result_obj, x_col, y_col,
                              x_label, y_label, title, filename) {
@@ -292,18 +292,18 @@ plot_clusters_2d <- function(result_obj, x_col, y_col,
     select(all_of(c(x_col, y_col, "prediction"))) %>%
     sdf_sample(fraction = 0.05, seed = 42L) %>%
     collect() %>%
-    mutate(klaster = factor(prediction))
+    mutate(cluster = factor(prediction))
 
   p <- ggplot(
     sample_local,
-    aes(x = .data[[x_col]], y = .data[[y_col]], color = klaster)
+    aes(x = .data[[x_col]], y = .data[[y_col]], color = cluster)
   ) +
     geom_point(alpha = 0.4, size = 1) +
     labs(
       title = title,
       x     = x_label,
       y     = y_label,
-      color = "Klaster"
+      color = "Cluster"
     ) +
     theme_minimal()
 
@@ -315,31 +315,32 @@ for (sc_params in kmeans_scenarios) {
   key <- paste0(sc_params$pred_label, "_k", sc_params$k)
   filename <- paste0("kmeans_scatter_", key, "_sc")
   title <- paste(
-    "Klasteri —", sc_params$name, "\n(view_count vs. like_rate, 5% uzorak)"
+    "Clusters", sc_params$name,
+    "\n(view_count vs. like_rate, 5% sample)"
   )
 
   plot_clusters_2d(
     kmeans_results[[key]],
     x_col = "view_count",
     y_col = "like_rate",
-    x_label = "Broj pregleda (view_count)",
-    y_label = "Stopa lajkova (like_rate)",
+    x_label = "View count",
+    y_label = "Like rate",
     title = title,
     filename = filename
   )
 }
 
 # ---------------------------------------------------------------------------
-# Vizualizacija 6-9: Prosečne vrednosti atributa po klasteru (heatmap)
+# Visualization 6–9: Mean feature values per cluster (heatmap)
 #
-# Heatmap standardizovanih proseka omogućava interpretaciju klastera:
-# koji klasteri imaju visoke/niske vrednosti kojih atributa.
+# Heatmaps of normalized means help interpret clusters:
+# which clusters exhibit high/low values for specific features.
 # ---------------------------------------------------------------------------
 for (sc_params in kmeans_scenarios) {
   key <- paste0(sc_params$pred_label, "_k", sc_params$k)
   means_df <- kmeans_results[[key]]$analysis$cluster_means
 
-  # Normalizacija po kolonama radi poređenja između atributa
+  # Column-wise normalization to enable comparison between features
   means_scaled <- means_df
   for (col in sc_params$predictors) {
     col_vals <- means_df[[col]]
@@ -354,32 +355,32 @@ for (sc_params in kmeans_scenarios) {
   heatmap_data <- melt(
     means_scaled[, c("prediction", sc_params$predictors)],
     id.vars       = "prediction",
-    variable.name = "atribut",
-    value.name    = "vrednost"
+    variable.name = "feature",
+    value.name    = "value"
   )
-  heatmap_data$klaster <- factor(heatmap_data$prediction)
+  heatmap_data$cluster <- factor(heatmap_data$prediction)
 
   p <- ggplot(
     heatmap_data,
-    aes(x = atribut, y = klaster, fill = vrednost)
+    aes(x = feature, y = cluster, fill = value)
   ) +
     geom_tile() +
-    geom_text(aes(label = round(vrednost, 2)), size = 3) +
+    geom_text(aes(label = round(value, 2)), size = 3) +
     scale_fill_gradient(low = "white", high = "steelblue") +
     theme_minimal() +
     theme(axis.text.x = element_text(angle = 35, hjust = 1)) +
     labs(
-      title = paste("Profil klastera —", sc_params$name),
-      x     = "Atribut",
-      y     = "Klaster",
-      fill  = "Norm. vrednost"
+      title = paste("Cluster profile", sc_params$name),
+      x     = "Feature",
+      y     = "Cluster",
+      fill  = "Normalized value"
     )
 
   save_plot(p, paste0("kmeans_heatmap_", key, "_sc"), width = 9, height = 5)
 }
 
 # ---------------------------------------------------------------------------
-# Čuvanje rezultata analize na disk
+# Save analysis results to disk
 # ---------------------------------------------------------------------------
 saveRDS(
   list(
@@ -390,7 +391,7 @@ saveRDS(
   file = "models/kmeans_results.rds"
 )
 
-cat("\nRezultati klasterizacije sačuvani: models/kmeans_results.rds\n")
+cat("\nClustering results saved: models/kmeans_results.rds\n")
 
 spark_disconnect(sc)
 

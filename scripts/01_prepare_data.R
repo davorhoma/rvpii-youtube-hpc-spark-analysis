@@ -5,7 +5,7 @@ library(janitor)
 
 load_youtube_data <- function(sc) {
   # ---------------------------------------------------------------------------
-  # 2.1 Učitavanje podataka
+  # 2.1 Data loading
   # ---------------------------------------------------------------------------
   dataset <- spark_read_csv(
     sc,
@@ -14,9 +14,9 @@ load_youtube_data <- function(sc) {
     header = TRUE,
     infer_schema = TRUE
   )
-
+  
   # print(sdf_schema(dataset))
-
+  
   dataset <- dataset %>%
     clean_names() %>%
     mutate(
@@ -29,21 +29,21 @@ load_youtube_data <- function(sc) {
       category_id = as.numeric(category_id),
       duration = as.character(duration)
     )
-
+  
   print(colnames(dataset))
   print(sdf_num_partitions(dataset))
   print(sdf_nrow(dataset))
-
+  
   # ---------------------------------------------------------------------------
-  # 2.3 Čišćenje podataka — uklanjanje duplikata po (video_id, trending_date)
+  # 2.3 Data cleaning — removing duplicates by (video_id, trending_date)
   # ---------------------------------------------------------------------------
   youtube_clean <- dataset %>%
     distinct(video_id, trending_date, .keep_all = TRUE)
-
+  
   print(sdf_nrow(youtube_clean))
-
+  
   # ---------------------------------------------------------------------------
-  # 2.4 Obrada nedostajućih vrednosti
+  # 2.4 Missing value handling
   # ---------------------------------------------------------------------------
   print("Missing values (na_counts):")
   na_counts <- youtube_clean %>%
@@ -62,28 +62,27 @@ load_youtube_data <- function(sc) {
       duration_na = sum(ifelse(is.na(duration), 1, 0))
     )
   print(na_counts)
-
-  # Napomena o dislikes: od 2021. YouTube je uklonio javni prikaz broja
-  # negativnih reakcija, što rezultuje ~65% nedostajućih vrednosti.
-  # Atribut se isključuje iz prediktorskog skupa.
+  
+  # Note on dislikes: since 2021 YouTube removed public dislike counts,
+  # resulting in ~65% missing values. This feature is excluded from modeling.
   dislikes_analysis <- youtube_clean %>%
     summarise(
-      ukupno = n(),
-      dislikes_postoji = sum(ifelse(!is.na(dislikes) & dislikes != 0, 1, 0)),
-      dislikes_nedostaje = sum(ifelse(is.na(dislikes) | dislikes == 0, 1, 0))
+      total = n(),
+      dislikes_present = sum(ifelse(!is.na(dislikes) & dislikes != 0, 1, 0)),
+      dislikes_missing = sum(ifelse(is.na(dislikes) | dislikes == 0, 1, 0))
     ) %>%
-    mutate(procenat_nedostaje = 100 * dislikes_nedostaje / ukupno)
+    mutate(missing_percentage = 100 * dislikes_missing / total)
   print(dislikes_analysis)
-
-  # Filtriranje obaveznih polja
+  
+  # Filtering required fields
   youtube_clean <- youtube_clean %>%
     filter(
       !is.na(video_id),
       !is.na(trending_date),
       !is.na(view_count) | view_count == 0
     )
-
-  # Imputacija medijanom za numeričke atribute (bez dislikes)
+  
+  # Median imputation for numerical attributes (excluding dislikes)
   medians <- youtube_clean %>%
     summarise(
       view_med     = percentile_approx(view_count, 0.5),
@@ -91,16 +90,16 @@ load_youtube_data <- function(sc) {
       comments_med = percentile_approx(comment_count, 0.5)
     ) %>%
     collect()
-
+  
   youtube_clean <- youtube_clean %>%
     mutate(
       view_count    = ifelse(is.na(view_count) | view_count == 0, medians$view_med, view_count),
       likes         = ifelse(is.na(likes), medians$likes_med, likes),
       comment_count = ifelse(is.na(comment_count), medians$comments_med, comment_count)
     )
-
+  
   # ---------------------------------------------------------------------------
-  # 2.6 Transformacija atributa — duration_seconds iz ISO 8601 formata
+  # 2.6 Feature transformation — duration_seconds from ISO 8601 format
   # ---------------------------------------------------------------------------
   youtube_clean <- youtube_clean %>%
     mutate(
@@ -114,33 +113,25 @@ load_youtube_data <- function(sc) {
           coalesce(s, 0L)
       )
     )
-
-  # Provera ispravnosti konverzije na uzorku
+  
+  # Validation sample
   youtube_clean %>%
     select(duration, duration_seconds) %>%
     sdf_sample(fraction = 0.001) %>%
     sdf_collect() %>%
     head(20) %>%
     print()
-
-  # Zamena nedostajućih tekstualnih vrednosti
+  
+  # Handling categorical missing values
   youtube_clean <- youtube_clean %>%
     mutate(
-      channel_title = ifelse(is.na(channel_title), "", channel_title),
-      title         = ifelse(is.na(title), "", title),
-      description   = ifelse(is.na(description), "", description),
-      category_id   = as.integer(coalesce(category_id, -1))
+      category_id = as.integer(coalesce(category_id, -1))
     )
-
-  # Selekcija relevantnih kolona (tekstualna polja title, tags, description
-  # zadržavaju se u datasetu, ali NEĆE biti korišćena kao prediktori
-  # u klasifikaciji i klasterizaciji)
+  
+  # Selecting relevant columns
   youtube_clean <- youtube_clean %>%
     select(
       video_id,
-      title,
-      channel_id,
-      channel_title,
       category_id,
       view_count,
       likes,
@@ -150,8 +141,8 @@ load_youtube_data <- function(sc) {
       published_at,
       trending_date
     )
-
-  # Mapiranje category_id na naziv kategorije
+  
+  # Mapping category_id to category names
   category_map <- data.frame(
     category_id = c(
       1, 2, 10, 15, 17,
@@ -200,28 +191,28 @@ load_youtube_data <- function(sc) {
   )
   category_map$category_id <- as.integer(category_map$category_id)
   category_map_spark <- copy_to(sc, category_map, overwrite = TRUE)
-
+  
   youtube_clean <- youtube_clean %>%
     left_join(category_map_spark, by = "category_id")
-
+  
   print(
     youtube_clean %>%
       select(category_id, category_name) %>%
       distinct() %>%
       collect()
   )
-
+  
   # ---------------------------------------------------------------------------
-  # 2.2 Adresiranje denormalizacije — agregacija po video_id
+  # 2.6 Addressing denormalization — aggregation by video_id
   #
-  # Originalni dataset sadrži po jedan red za svaki (video_id, trending_date)
-  # par, tj. isti video se može pojaviti više puta. Za klasifikaciju i
-  # klasterizaciju kreira se agregirani skup sa jednim redom po video_id,
-  # koristeći maksimalne vrednosti numeričkih atributa (peak popularnosti).
+  # The original dataset contains multiple rows per (video_id, trending_date)
+  # meaning each video appears multiple times over time. For classification
+  # and clustering, we aggregate to one row per video_id using maximum values
+  # of numerical attributes (peak popularity).
   # ---------------------------------------------------------------------------
-  print("Broj redova pre agregacije:")
+  print("Number of rows before aggregation:")
   print(sdf_nrow(youtube_clean))
-
+  
   youtube_aggregated <- youtube_clean %>%
     group_by(video_id, category_id, category_name) %>%
     summarise(
@@ -229,21 +220,20 @@ load_youtube_data <- function(sc) {
       likes = max(likes, na.rm = TRUE),
       comment_count = max(comment_count, na.rm = TRUE),
       duration_seconds = max(duration_seconds, na.rm = TRUE),
-      trending_count = n(), # koliko puta je video bio trending
+      trending_count = n(),
       .groups = "drop"
     )
-
-  print("Broj redova nakon agregacije po video_id:")
+  
+  print("Number of rows after aggregation by video_id:")
   print(sdf_nrow(youtube_aggregated))
-
+  
   # ---------------------------------------------------------------------------
-  # 2.7 Izvođenje novih atributa — stope angažmana
+  # 2.7 Feature engineering — engagement rates
   #
-  # Stopa pozitivnih reakcija:
+  # Like rate:
   #   like_rate = likes / view_count
-  #   
   #
-  # Stopa komentara:
+  # Comment rate:
   #   comment_rate = comment_count / view_count
   # ---------------------------------------------------------------------------
   youtube_aggregated <- youtube_aggregated %>%
@@ -251,15 +241,13 @@ load_youtube_data <- function(sc) {
       like_rate    = likes / view_count,
       comment_rate = comment_count / view_count
     ) %>%
-    # Uklanjaju se zapisi gde su izvedeni atributi nevažeći
-    # (view_count == 0 bi davao Inf/NaN)
     filter(
       view_count > 0,
       !is.na(like_rate),
       !is.na(comment_rate)
     )
-
-  print("Provera izvedenih atributa (uzorak):")
+  
+  print("Sample of engineered features:")
   youtube_aggregated %>%
     select(
       video_id, view_count, likes, comment_count,
@@ -269,9 +257,9 @@ load_youtube_data <- function(sc) {
     sdf_collect() %>%
     head(10) %>%
     print()
-
-  print("Finalni broj zapisa (agregirani skup):")
+  
+  print("Final number of records (aggregated dataset):")
   print(sdf_nrow(youtube_aggregated))
-
+  
   return(youtube_aggregated)
 }

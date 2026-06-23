@@ -11,13 +11,13 @@ youtube_data <- load_youtube_data(sc)
 print(colnames(youtube_data))
 
 # ---------------------------------------------------------------------------
-# 3. Preliminarna analiza podataka
+# 3. Exploratory Data Analysis
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
-# 3.1 Deskriptivna statistika
-# Primenjuje se na: view_count, likes, comment_count, duration_seconds
-# i izvedene atribute: like_rate, comment_rate
+# 3.1 Descriptive Statistics
+# Applied to: view_count, likes, comment_count, duration_seconds
+# and derived features: like_rate, comment_rate
 # ---------------------------------------------------------------------------
 
 num_stats <- youtube_data %>%
@@ -81,7 +81,7 @@ num_stats <- youtube_data %>%
 print(num_stats)
 
 # ---------------------------------------------------------------------------
-# Prikupljanje podataka za lokalne vizualizacije
+# Collect data for local visualizations
 # ---------------------------------------------------------------------------
 youtube_sample <- youtube_data %>%
   select(
@@ -92,92 +92,92 @@ youtube_sample <- youtube_data %>%
   collect()
 
 # ---------------------------------------------------------------------------
-# 3.2 Vizualizacija distribucija
+# 3.2 Distribution Visualization
 # ---------------------------------------------------------------------------
 
-# --- Histogrami (log skala) ------------------------------------------------
+# --- Histograms (log scale) ------------------------------------------------
 
 hist_1 <- ggplot(youtube_sample, aes(x = view_count)) +
   geom_histogram(bins = 50, fill = "steelblue", color = "white") +
   scale_x_log10(labels = scales::comma) +
   labs(
-    title = "Raspodela broja pregleda (log skala)",
-    x = "Broj pregleda", y = "Broj video zapisa"
+    title = "Distribution of View Counts (log scale)",
+    x = "View Count", y = "Number of Videos"
   )
 
 hist_2 <- ggplot(youtube_sample, aes(x = likes)) +
   geom_histogram(bins = 50, fill = "steelblue", color = "white") +
   scale_x_log10(labels = scales::comma) +
   labs(
-    title = "Raspodela broja lajkova (log skala)",
-    x = "Broj lajkova", y = "Broj video zapisa"
+    title = "Distribution of Likes (log scale)",
+    x = "Like Count", y = "Number of Videos"
   )
 
 hist_3 <- ggplot(youtube_sample, aes(x = comment_count)) +
   geom_histogram(bins = 50, fill = "steelblue", color = "white") +
   scale_x_log10(labels = scales::comma) +
   labs(
-    title = "Raspodela broja komentara (log skala)",
-    x = "Broj komentara", y = "Broj video zapisa"
+    title = "Distribution of Comments (log scale)",
+    x = "Comment Count", y = "Number of Videos"
   )
 
 hist_4 <- ggplot(youtube_sample, aes(x = duration_seconds)) +
   geom_histogram(bins = 50, fill = "steelblue", color = "white") +
   scale_x_log10(labels = scales::comma) +
   labs(
-    title = "Raspodela trajanja video zapisa (log skala)",
-    x = "Trajanje (sekunde)", y = "Broj video zapisa"
+    title = "Distribution of Video Duration (log scale)",
+    x = "Duration (seconds)", y = "Number of Videos"
   )
 
 hist_5 <- ggplot(youtube_sample, aes(x = like_rate)) +
   geom_histogram(bins = 50, fill = "darkorange", color = "white") +
   scale_x_log10() +
   labs(
-    title = "Raspodela stope lajkova (log skala)",
-    x = "Like rate", y = "Broj video zapisa"
+    title = "Distribution of Like Rate (log scale)",
+    x = "Like Rate", y = "Number of Videos"
   )
 
 hist_6 <- ggplot(youtube_sample, aes(x = comment_rate)) +
   geom_histogram(bins = 50, fill = "darkorange", color = "white") +
   scale_x_log10() +
   labs(
-    title = "Raspodela stope komentara (log skala)",
-    x = "Comment rate", y = "Broj video zapisa"
+    title = "Distribution of Comment Rate (log scale)",
+    x = "Comment rate", y = "Number of Videos"
   )
 
-# --- Boxplotovi ---
+# --- Boxplots ---
 
 boxplot_1 <- ggplot(youtube_sample, aes(y = view_count)) +
   geom_boxplot(fill = "steelblue") +
   scale_y_log10(labels = scales::comma) +
-  labs(title = "Boxplot broja pregleda", y = "Broj pregleda")
+  labs(title = "View Count Boxplot", y = "View Count")
 
 boxplot_2 <- ggplot(youtube_sample, aes(y = likes)) +
   geom_boxplot(fill = "steelblue") +
   scale_y_log10(labels = scales::comma) +
-  labs(title = "Boxplot broja lajkova", y = "Broj lajkova")
+  labs(title = "Likes Boxplot", y = "Like Count")
 
 boxplot_3 <- ggplot(youtube_sample, aes(y = comment_count)) +
   geom_boxplot(fill = "steelblue") +
   scale_y_log10(labels = scales::comma) +
-  labs(title = "Boxplot broja komentara", y = "Broj komentara")
+  labs(title = "Comment Count Boxplot", y = "Comment Count")
 
 boxplot_4 <- ggplot(youtube_sample, aes(y = duration_seconds)) +
   geom_boxplot(fill = "steelblue") +
   scale_y_log10() +
-  labs(title = "Boxplot trajanja video zapisa", y = "Trajanje (sekunde)")
+  labs(title = "Video Duration Boxplot", y = "Duration (seconds)")
 
 boxplot_5 <- ggplot(youtube_sample, aes(y = like_rate)) +
   geom_boxplot(fill = "darkorange") +
   scale_y_log10() +
-  labs(title = "Boxplot stope lajkova", y = "Like rate")
+  labs(title = "Like Rate Boxplot", y = "Like Rate")
 
 boxplot_6 <- ggplot(youtube_sample, aes(y = comment_rate)) +
   geom_boxplot(fill = "darkorange") +
   scale_y_log10() +
-  labs(title = "Boxplot stope komentara", y = "Comment rate")
+  labs(title = "Comment Rate Boxplot", y = "Comment rate")
 
-# --- Bar plot - distribucija po kategorijama -------------------------------
+# --- Bar Plot - Category Distribution -------------------------------
 
 category_counts <- youtube_data %>%
   count(category_name, sort = TRUE) %>%
@@ -187,15 +187,15 @@ barplot_1 <- ggplot(category_counts, aes(x = reorder(category_name, n), y = n)) 
   geom_col(fill = "steelblue") +
   coord_flip() +
   labs(
-    title = "Broj video zapisa po kategoriji",
-    x = "Kategorija", y = "Broj video zapisa"
+    title = "Number of Videos by Category",
+    x = "Category", y = "Number of Videos"
   )
 
 # ---------------------------------------------------------------------------
-# 3.3 Analiza odnosa između obeležja
+# 3.3 Feature Relationship Analysis
 # ---------------------------------------------------------------------------
 
-# --- 3.3.1 Korelaciona analiza numeričkih varijabli ---
+# --- 3.3.1 Correlation Analysis of Numerical Variables ---
 
 numeric_data <- youtube_sample %>%
   select(
@@ -208,7 +208,7 @@ cor_matrix <- cor(numeric_data, use = "complete.obs")
 options(width = 200)
 print(cor_matrix)
 
-# Vizualizacija korelacione matrice
+# Correlation matrix visualization
 cor_long <- melt(cor_matrix)
 
 cor_matrix_plot_1 <- ggplot(cor_long, aes(Var1, Var2, fill = value)) +
@@ -216,21 +216,21 @@ cor_matrix_plot_1 <- ggplot(cor_long, aes(Var1, Var2, fill = value)) +
   geom_text(aes(label = round(value, 2)), size = 3) +
   scale_fill_gradient2(
     low = "blue", high = "red", mid = "white", midpoint = 0,
-    limits = c(-1, 1), name = "Korelacija"
+    limits = c(-1, 1), name = "Correlation"
   ) +
   theme_minimal() +
   theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
-  labs(title = "Korelaciona matrica numeričkih varijabli", x = "", y = "")
+  labs(title = "Correlation Matrix of Numerical Variables", x = "", y = "")
 
-# --- 3.3.2 Scatter plot analiza odnosa između numeričkih varijabli ---
+# --- 3.3.2 Scatter Plot Analysis of Relationships Between Numerical Variables ---
 
 scatter_plot_1 <- ggplot(numeric_data, aes(x = view_count, y = likes)) +
   geom_point(alpha = 0.2, size = 0.8) +
   scale_x_log10(labels = scales::comma) +
   scale_y_log10(labels = scales::comma) +
   labs(
-    title = "Broj pregleda vs. broj lajkova (log-log skala)",
-    x = "Broj pregleda", y = "Broj lajkova"
+    title = "View Count vs. Likes (log-log scale)",
+    x = "View Count", y = "Like Count"
   )
 
 scatter_plot_2 <- ggplot(numeric_data, aes(x = view_count, y = comment_count)) +
@@ -238,8 +238,8 @@ scatter_plot_2 <- ggplot(numeric_data, aes(x = view_count, y = comment_count)) +
   scale_x_log10(labels = scales::comma) +
   scale_y_log10(labels = scales::comma) +
   labs(
-    title = "Broj pregleda vs. broj komentara (log-log skala)",
-    x = "Broj pregleda", y = "Broj komentara"
+    title = "View Count vs. Comment Count (log-log scale)",
+    x = "View Count", y = "Comment Count"
   )
 
 scatter_plot_3 <- ggplot(numeric_data, aes(x = likes, y = comment_count)) +
@@ -247,30 +247,30 @@ scatter_plot_3 <- ggplot(numeric_data, aes(x = likes, y = comment_count)) +
   scale_x_log10(labels = scales::comma) +
   scale_y_log10(labels = scales::comma) +
   labs(
-    title = "Broj lajkova vs. broj komentara (log-log skala)",
-    x = "Broj lajkova", y = "Broj komentara"
+    title = "Likes vs. Comment Count (log-log scale)",
+    x = "Like Count", y = "Comment Count"
   )
 
 scatter_plot_4 <- ggplot(numeric_data, aes(x = duration_seconds, y = view_count)) +
   geom_point(alpha = 0.2, size = 0.8) +
-  scale_x_log10() +
+  scale_x_log10(labels = scales::comma) +
   scale_y_log10(labels = scales::comma) +
   labs(
-    title = "Trajanje vs. broj pregleda (log-log skala)",
-    x = "Trajanje (sekunde)", y = "Broj pregleda"
+    title = "Duration vs. View Count (log-log scale)",
+    x = "Duration (seconds)", y = "View Count"
   )
 
-# Scatter plotovi za izvedena obeležja
+# Scatter plots for derived features
 scatter_plot_5 <- ggplot(numeric_data, aes(x = like_rate, y = comment_rate)) +
   geom_point(alpha = 0.2, size = 0.8) +
   scale_x_log10() +
   scale_y_log10() +
   labs(
-    title = "Stopa lajkova vs. stopa komentara (log-log skala)",
-    x = "Like rate", y = "Comment rate"
+    title = "Like Rate vs. Comment Rate (log-log scale)",
+    x = "Like Rate", y = "Comment Rate"
   )
 
-# --- 3.3.3 Odnos kategorijskih i numeričkih varijabli ---
+# --- 3.3.3 Relationship Between Categorical and Numerical Variables ---
 
 ratio_plot_1 <- ggplot(youtube_sample, aes(
   x = reorder(category_name, view_count, median),
@@ -280,8 +280,8 @@ ratio_plot_1 <- ggplot(youtube_sample, aes(
   scale_y_log10(labels = scales::comma) +
   coord_flip() +
   labs(
-    title = "Broj pregleda po kategoriji",
-    x = "Kategorija", y = "Broj pregleda (log skala)"
+    title = "View Count by Category",
+    x = "Category", y = "View Count (log scale)"
   )
 
 ratio_plot_2 <- ggplot(youtube_sample, aes(
@@ -292,8 +292,8 @@ ratio_plot_2 <- ggplot(youtube_sample, aes(
   scale_y_log10(labels = scales::comma) +
   coord_flip() +
   labs(
-    title = "Broj lajkova po kategoriji",
-    x = "Kategorija", y = "Broj lajkova (log skala)"
+    title = "Likes by Category",
+    x = "Category", y = "Like Count (log scale)"
   )
 
 ratio_plot_3 <- ggplot(youtube_sample, aes(
@@ -304,8 +304,8 @@ ratio_plot_3 <- ggplot(youtube_sample, aes(
   scale_y_log10(labels = scales::comma) +
   coord_flip() +
   labs(
-    title = "Broj komentara po kategoriji",
-    x = "Kategorija", y = "Broj komentara (log skala)"
+    title = "Comment Count by Category",
+    x = "Category", y = "Comment Count (log scale)"
   )
 
 ratio_plot_4 <- ggplot(youtube_sample, aes(
@@ -313,11 +313,11 @@ ratio_plot_4 <- ggplot(youtube_sample, aes(
   y = like_rate
 )) +
   geom_boxplot(fill = "darkorange", outlier.size = 0.5, outlier.alpha = 0.3) +
-  scale_y_log10() +
+  scale_y_log10(labels = scales::comma) +
   coord_flip() +
   labs(
-    title = "Stopa lajkova po kategoriji",
-    x = "Kategorija", y = "Like rate (log skala)"
+    title = "Like Rate by Category",
+    x = "Category", y = "Like Rate (log scale)"
   )
 
 ratio_plot_5 <- ggplot(youtube_sample, aes(
@@ -325,11 +325,11 @@ ratio_plot_5 <- ggplot(youtube_sample, aes(
   y = comment_rate
 )) +
   geom_boxplot(fill = "darkorange", outlier.size = 0.5, outlier.alpha = 0.3) +
-  scale_y_log10() +
+  scale_y_log10(labels = scales::comma) +
   coord_flip() +
   labs(
-    title = "Stopa komentara po kategoriji",
-    x = "Kategorija", y = "Comment rate (log skala)"
+    title = "Comment Rate by Category",
+    x = "Category", y = "Comment Rate (log scale)"
   )
 
 ratio_plot_6 <- ggplot(youtube_sample, aes(
@@ -337,11 +337,11 @@ ratio_plot_6 <- ggplot(youtube_sample, aes(
   y = duration_seconds
 )) +
   geom_boxplot(fill = "steelblue", outlier.size = 0.5, outlier.alpha = 0.3) +
-  scale_y_log10() +
+  scale_y_log10(labels = scales::comma) +
   coord_flip() +
   labs(
-    title = "Trajanje video zapisa po kategoriji",
-    x = "Kategorija", y = "Trajanje (sekunde, log skala)"
+    title = "Video Duration by Category",
+    x = "Category", y = "Duration (seconds, log scale)"
   )
 
 source("scripts/save_plot.R")
@@ -375,3 +375,5 @@ save_plot(ratio_plot_3, "ratio_plot_3")
 save_plot(ratio_plot_4, "ratio_plot_4")
 save_plot(ratio_plot_5, "ratio_plot_5")
 save_plot(ratio_plot_6, "ratio_plot_6")
+
+spark_disconnect(sc)
